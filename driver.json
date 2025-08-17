@@ -34,5 +34,6 @@
       }
     ]
   },
-  "release_date": "2025-01-01"
+  "release_date": "2025-01-01",
+  "icon": "uc:g"
 }

@@ -7,6 +7,7 @@ Govee API client implementation.
 
 import asyncio
 import logging
+import ssl
 from typing import Any, Dict, List, Optional
 
 import aiohttp
@@ -205,10 +206,24 @@ class GoveeClient:
 
     async def connect(self) -> None:
         if self.session is None:
-            timeout = aiohttp.ClientTimeout(total=30)
+            # Create SSL context that's more permissive for containerized environments
+            ssl_context = ssl.create_default_context()
+            # For production environments with certificate issues, you might need:
+            # ssl_context.check_hostname = False
+            # ssl_context.verify_mode = ssl.CERT_NONE
+            # But we'll try the default first and fallback if needed
+            
+            connector = aiohttp.TCPConnector(
+                ssl=ssl_context,
+                ttl_dns_cache=300,
+                use_dns_cache=True,
+            )
+            
+            timeout = aiohttp.ClientTimeout(total=30, connect=10)
             self.session = aiohttp.ClientSession(
                 headers=self._headers,
-                timeout=timeout
+                timeout=timeout,
+                connector=connector
             )
 
     async def disconnect(self) -> None:
@@ -245,10 +260,52 @@ class GoveeClient:
                     else:
                         raise GoveeAPIError(f"HTTP {response.status}: {response_data}", response.status)
                         
+            except ssl.SSLError as e:
+                _LOG.error(f"SSL Error connecting to Govee API: {e}")
+                # Try to reconnect with more permissive SSL settings
+                await self._reconnect_with_fallback_ssl()
+                # Retry the request once with new session
+                try:
+                    async with self.session.request(method, url, json=data) as response:
+                        response_data = await response.json()
+                        
+                        if response.status == 200 and response_data.get("code") == 200:
+                            return response_data
+                        else:
+                            raise GoveeAPIError(f"API error after SSL fallback: {response_data.get('message', 'Unknown error')}")
+                            
+                except Exception as retry_e:
+                    raise GoveeAPIError(f"SSL connection failed even with fallback: {str(retry_e)}")
+                    
             except aiohttp.ClientError as e:
                 raise GoveeAPIError(f"Network error: {str(e)}")
             except Exception as e:
                 raise GoveeAPIError(f"Unexpected error: {str(e)}")
+
+    async def _reconnect_with_fallback_ssl(self) -> None:
+        """Reconnect with more permissive SSL settings for problematic environments."""
+        if self.session:
+            await self.session.close()
+            
+        # Create more permissive SSL context for containerized environments
+        ssl_context = ssl.create_default_context()
+        ssl_context.check_hostname = False
+        ssl_context.verify_mode = ssl.CERT_NONE
+        
+        _LOG.warning("Using fallback SSL settings due to certificate verification issues")
+        
+        connector = aiohttp.TCPConnector(
+            ssl=ssl_context,
+            ttl_dns_cache=300,
+            use_dns_cache=True,
+        )
+        
+        timeout = aiohttp.ClientTimeout(total=30, connect=10)
+        self.session = aiohttp.ClientSession(
+            headers=self._headers,
+            timeout=timeout,
+            connector=connector
+        )
 
     async def get_devices(self) -> List[GoveeDevice]:
         _LOG.info("Fetching devices from Govee API")
