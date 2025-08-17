@@ -1,39 +1,52 @@
 {
-  "driver_id": "uc_intg_govee",
-  "version": "0.1.0",
-  "min_core_api": "0.21.0",
-  "name": {
-    "en": "Govee Smart Home Devices"
-  },
-  "description": {
-    "en": "Control Govee smart home devices including lights, switches, sensors, and appliances"
-  },
-  "icon": "uc:integration",
-  "port": 9090,
-  "developer": {
-    "name": "Meir Miyara",
-    "email": "meir.miyara@gmail.com"
-  },
-  "home_page": "https://github.com/mase1981/uc-intg-govee",
-  "documentation": "https://github.com/mase1981/uc-intg-govee/blob/main/README.md",
-  "setup_data_schema": {
-    "title": {
-      "en": "Govee API Configuration"
+    "driver_id": "uc_intg_govee",
+    "version": "0.1.1",
+    "min_core_api": "0.21.0",
+    "name": {
+        "en": "Govee Smart Home Devices",
+        "de": "Govee Smart Home Geräte",
+        "fr": "Appareils Domestiques Intelligents Govee"
     },
-    "settings": [
-      {
-        "id": "api_key",
-        "label": {
-          "en": "Govee API Key"
+    "description": {
+        "en": "Control Govee smart home devices including lights, switches, sensors, and appliances via Cloud API",
+        "de": "Steuern Sie Govee Smart-Home-Geräte einschließlich Lichter, Schalter, Sensoren und Geräte über Cloud-API",
+        "fr": "Contrôlez les appareils domestiques intelligents Govee, y compris les lumières, interrupteurs, capteurs et appareils via l'API Cloud"
+    },
+    "developer": {
+        "name": "Meir Miyara",
+        "email": "meir.miyara@gmail.com",
+        "url": "https://github.com/mase1981"
+    },
+    "home_page": "https://github.com/mase1981/uc-intg-govee",
+    "documentation": "https://github.com/mase1981/uc-intg-govee/blob/main/README.md",
+    "setup_data_schema": {
+        "title": {
+            "en": "Govee API Configuration",
+            "de": "Govee API Konfiguration",
+            "fr": "Configuration API Govee"
         },
-        "field": {
-          "text": {
-            "placeholder": "Enter your Govee API key"
-          }
-        }
-      }
-    ]
-  },
-  "release_date": "2025-01-01",
-  "icon": "uc:g"
+        "settings": [
+            {
+                "id": "api_key",
+                "label": {
+                    "en": "Govee API Key",
+                    "de": "Govee API-Schlüssel",
+                    "fr": "Clé API Govee"
+                },
+                "field": {
+                    "text": {
+                        "placeholder": "Enter your Govee API key"
+                    }
+                }
+            }
+        ]
+    },
+    "release_date": "2025-01-17",
+    "icon": "uc:g",
+    "enabled": true,
+    "port": 9090,
+    "mdns": {
+        "name": "Govee Smart Home Integration",
+        "mdns_type": "_uc-integration._tcp.local."
+    }
 }
