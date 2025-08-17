@@ -27,6 +27,7 @@ class GoveeRemote:
         self._config = config
         self._device_throttle = {}
         self._global_throttle = 0
+        self._device_states = {}
         
         self._discovered_devices = self._config.devices
         _LOG.info(f"Creating remote with {len(self._discovered_devices)} discovered devices")
@@ -361,6 +362,47 @@ class GoveeRemote:
         self._api.configured_entities.update_attributes(self.entity.id, initial_attributes)
         _LOG.info(f"Initial state set successfully - remote entity is {initial_state}")
 
+    async def _get_device_state(self, device_id: str) -> bool:
+        """Get the current state of a device. Returns True if on, False if off."""
+        try:
+            device_info = self._discovered_devices.get(device_id)
+            if not device_info:
+                return False
+        
+            from uc_intg_govee.client import GoveeDevice
+        
+            device_data = {
+                "sku": device_info.get("sku", ""),
+                "device": device_id,
+                "deviceName": device_info.get("name", ""),
+                "type": device_info.get("api_type", ""),
+                "capabilities": device_info.get("capabilities", [])
+            }
+        
+            device = GoveeDevice(device_data)
+            state_data = await self._client.get_device_state(device)
+        
+            # Parse the state from Govee API response
+            if state_data and 'capabilities' in state_data:
+                for capability in state_data['capabilities']:
+                    if capability.get('type') == 'devices.capabilities.on_off' and capability.get('instance') == 'powerSwitch':
+                        value = capability.get('state', {}).get('value', 0)
+                        is_on = bool(value)
+                        # Cache the state
+                        self._device_states[device_id] = is_on
+                        _LOG.debug(f"Device {device_id} state from API: {is_on}")
+                        return is_on
+        
+            # Fallback to cached state or assume off
+            cached_state = self._device_states.get(device_id, False)
+            _LOG.debug(f"Device {device_id} using cached state: {cached_state}")
+            return cached_state
+        
+        except Exception as e:
+            _LOG.warning(f"Failed to get state for device {device_id}: {e}")
+            # Return cached state or assume off
+            return self._device_states.get(device_id, False)
+        
     async def _check_throttle(self, device_id: str) -> bool:
         import time
         
@@ -471,11 +513,34 @@ class GoveeRemote:
             device = GoveeDevice(device_data)
             
             if action == "turn_on":
-                return await self._client.turn_on(device)
+                result = await self._client.turn_on(device)
+                if result:
+                    self._device_states[device_id] = True
+                return result
             elif action == "turn_off":
-                return await self._client.turn_off(device)
+                result = await self._client.turn_off(device)
+                if result:
+                    self._device_states[device_id] = False
+                return result
             elif action == "toggle":
-                return await self._client.turn_on(device)
+                # Get current state and toggle appropriately
+                current_state = await self._get_device_state(device_id)
+                _LOG.info(f"Toggle for {device_name}: current state is {'ON' if current_state else 'OFF'}")
+                
+                if current_state:
+                    # Device is on, turn it off
+                    result = await self._client.turn_off(device)
+                    if result:
+                        self._device_states[device_id] = False
+                        _LOG.info(f"Toggled {device_name} OFF")
+                else:
+                    # Device is off, turn it on
+                    result = await self._client.turn_on(device)
+                    if result:
+                        self._device_states[device_id] = True
+                        _LOG.info(f"Toggled {device_name} ON")
+                
+                return result
             else:
                 return False
                 
@@ -508,7 +573,7 @@ class GoveeRemote:
                         }
                         
                         device = GoveeDevice(device_data)
-                        return await self._execute_mapped_action(device, govee_action_result, device_info)
+                        return await self._execute_mapped_action(device, govee_action_result, device_info, device_id)
                         
                     except Exception as e:
                         _LOG.error(f"Exception executing action on device {device_name}: {e}")
@@ -518,14 +583,41 @@ class GoveeRemote:
         
         return False
     
-    async def _execute_mapped_action(self, device: 'GoveeDevice', action: str, device_info: Dict[str, Any]) -> bool:
+    async def _execute_mapped_action(self, device: 'GoveeDevice', action: str, device_info: Dict[str, Any], device_id: str = None) -> bool:
         try:
             if action == "turn_on":
-                return await self._client.turn_on(device)
+                result = await self._client.turn_on(device)
+                if result and device_id:
+                    self._device_states[device_id] = True
+                return result
             elif action == "turn_off":
-                return await self._client.turn_off(device)
+                result = await self._client.turn_off(device)
+                if result and device_id:
+                    self._device_states[device_id] = False
+                return result
             elif action == "toggle":
-                return await self._client.turn_on(device)
+                # Proper toggle implementation
+                if device_id:
+                    current_state = await self._get_device_state(device_id)
+                    _LOG.info(f"Toggle for {device.device_name}: current state is {'ON' if current_state else 'OFF'}")
+                    
+                    if current_state:
+                        # Device is on, turn it off
+                        result = await self._client.turn_off(device)
+                        if result:
+                            self._device_states[device_id] = False
+                            _LOG.info(f"Toggled {device.device_name} OFF")
+                    else:
+                        # Device is off, turn it on
+                        result = await self._client.turn_on(device)
+                        if result:
+                            self._device_states[device_id] = True
+                            _LOG.info(f"Toggled {device.device_name} ON")
+                    
+                    return result
+                else:
+                    # Fallback if device_id not available - just turn on
+                    return await self._client.turn_on(device)
             elif action.startswith("brightness_"):
                 if "up" in action:
                     brightness = 100
@@ -589,7 +681,7 @@ class GoveeRemote:
         except Exception as e:
             _LOG.error(f"Error executing mapped action {action}: {e}")
             return False
-    
+
     def _map_ui_action_to_govee_action(self, ui_action: str, device_info: Dict[str, Any]) -> Optional[str]:
         if ui_action == "ON":
             return "turn_on" if device_info.get("supports_power") else None
