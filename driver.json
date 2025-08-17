@@ -1,0 +1,38 @@
+{
+  "driver_id": "uc_intg_govee",
+  "version": "0.1.0",
+  "min_core_api": "0.21.0",
+  "name": {
+    "en": "Govee Smart Home Devices"
+  },
+  "description": {
+    "en": "Control Govee smart home devices including lights, switches, sensors, and appliances"
+  },
+  "icon": "uc:integration",
+  "port": 9090,
+  "developer": {
+    "name": "Meir Miyara",
+    "email": "meir.miyara@gmail.com"
+  },
+  "home_page": "https://github.com/mase1981/uc-intg-govee",
+  "documentation": "https://github.com/mase1981/uc-intg-govee/blob/main/README.md",
+  "setup_data_schema": {
+    "title": {
+      "en": "Govee API Configuration"
+    },
+    "settings": [
+      {
+        "id": "api_key",
+        "label": {
+          "en": "Govee API Key"
+        },
+        "field": {
+          "text": {
+            "placeholder": "Enter your Govee API key"
+          }
+        }
+      }
+    ]
+  },
+  "release_date": "2025-01-01"
+}
