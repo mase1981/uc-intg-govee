@@ -47,8 +47,14 @@ class GoveeDevice:
         self.supports_timer = self._has_capability("devices.capabilities.timer")
         self.supports_humidity = self._has_capability("devices.capabilities.range", "humidity")
         self.supports_fan_mode = self._has_capability("devices.capabilities.work_mode", "fanMode")
+        self.supports_gradient = self._has_capability("devices.capabilities.toggle", "gradientToggle")
+        self.supports_dreamview = self._has_capability("devices.capabilities.toggle", "dreamViewToggle")
+        self.supports_segmented = self._has_capability("devices.capabilities.segment_color_setting")
 
     def _determine_device_type(self) -> str:
+        if self.sku in ["H6603", "H6604", "H8604"]:
+            return "sync_box"
+        
         if self.api_type:
             type_mapping = {
                 "devices.types.light": "light",
@@ -137,6 +143,19 @@ class GoveeDevice:
                                 })
         return modes
 
+    def get_music_modes(self) -> List[Dict[str, Any]]:
+        modes = []
+        cap = self.get_capability("devices.capabilities.music_setting", "musicMode")
+        if cap and "parameters" in cap and "fields" in cap["parameters"]:
+            for field in cap["parameters"]["fields"]:
+                if field.get("fieldName") == "musicMode" and "options" in field:
+                    for option in field["options"]:
+                        modes.append({
+                            "name": option.get("name"),
+                            "value": option.get("value")
+                        })
+        return modes
+
     def get_scene_options(self) -> List[Dict[str, Any]]:
         scenes = []
         for cap in self.capabilities:
@@ -167,10 +186,14 @@ class GoveeDevice:
             "supports_timer": self.supports_timer,
             "supports_humidity": self.supports_humidity,
             "supports_fan_mode": self.supports_fan_mode,
+            "supports_gradient": self.supports_gradient,
+            "supports_dreamview": self.supports_dreamview,
+            "supports_segmented": self.supports_segmented,
             "brightness_range": self.get_brightness_range() if self.supports_brightness else None,
             "color_temp_range": self.get_color_temp_range() if self.supports_color_temp else None,
             "temperature_range": self.get_temperature_range() if self.supports_temperature else None,
             "work_modes": self.get_work_modes(),
+            "music_modes": self.get_music_modes(),
             "scenes": self.get_scene_options()
         }
 
@@ -206,12 +229,7 @@ class GoveeClient:
 
     async def connect(self) -> None:
         if self.session is None:
-            # Create SSL context that's more permissive for containerized environments
             ssl_context = ssl.create_default_context()
-            # For production environments with certificate issues, you might need:
-            # ssl_context.check_hostname = False
-            # ssl_context.verify_mode = ssl.CERT_NONE
-            # But we'll try the default first and fallback if needed
             
             connector = aiohttp.TCPConnector(
                 ssl=ssl_context,
@@ -262,9 +280,7 @@ class GoveeClient:
                         
             except ssl.SSLError as e:
                 _LOG.error(f"SSL Error connecting to Govee API: {e}")
-                # Try to reconnect with more permissive SSL settings
                 await self._reconnect_with_fallback_ssl()
-                # Retry the request once with new session
                 try:
                     async with self.session.request(method, url, json=data) as response:
                         response_data = await response.json()
@@ -283,11 +299,9 @@ class GoveeClient:
                 raise GoveeAPIError(f"Unexpected error: {str(e)}")
 
     async def _reconnect_with_fallback_ssl(self) -> None:
-        """Reconnect with more permissive SSL settings for problematic environments."""
         if self.session:
             await self.session.close()
             
-        # Create more permissive SSL context for containerized environments
         ssl_context = ssl.create_default_context()
         ssl_context.check_hostname = False
         ssl_context.verify_mode = ssl.CERT_NONE
@@ -415,6 +429,20 @@ class GoveeClient:
 
     async def set_scene(self, device: GoveeDevice, instance: str, scene_value: int) -> bool:
         return await self.control_device(device, "devices.capabilities.dynamic_scene", instance, scene_value)
+
+    async def set_gradient(self, device: GoveeDevice, enabled: bool) -> bool:
+        return await self.control_device(device, "devices.capabilities.toggle", "gradientToggle", 1 if enabled else 0)
+
+    async def set_dreamview(self, device: GoveeDevice, enabled: bool) -> bool:
+        return await self.control_device(device, "devices.capabilities.toggle", "dreamViewToggle", 1 if enabled else 0)
+
+    async def set_music_mode(self, device: GoveeDevice, mode: int, sensitivity: int) -> bool:
+        return await self.control_device(
+            device,
+            "devices.capabilities.music_setting",
+            "musicMode",
+            {"musicMode": mode, "sensitivity": sensitivity, "autoColor": 1}
+        )
 
     async def test_connection(self) -> bool:
         try:

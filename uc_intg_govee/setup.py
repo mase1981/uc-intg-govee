@@ -142,10 +142,14 @@ class GoveeSetup:
                     "supports_timer": capabilities_summary["supports_timer"],
                     "supports_humidity": capabilities_summary["supports_humidity"],
                     "supports_fan_mode": capabilities_summary["supports_fan_mode"],
+                    "supports_gradient": capabilities_summary["supports_gradient"],
+                    "supports_dreamview": capabilities_summary["supports_dreamview"],
+                    "supports_segmented": capabilities_summary["supports_segmented"],
                     "brightness_range": capabilities_summary["brightness_range"],
                     "color_temp_range": capabilities_summary["color_temp_range"],
                     "temperature_range": capabilities_summary["temperature_range"],
                     "work_modes": capabilities_summary["work_modes"],
+                    "music_modes": capabilities_summary["music_modes"],
                     "scenes": capabilities_summary["scenes"]
                 }
                 
@@ -154,7 +158,10 @@ class GoveeSetup:
                           f"Brightness={capabilities_summary['supports_brightness']}, "
                           f"Color={capabilities_summary['supports_color']}, "
                           f"Temperature={capabilities_summary['supports_temperature']}, "
-                          f"WorkMode={capabilities_summary['supports_work_mode']}")
+                          f"WorkMode={capabilities_summary['supports_work_mode']}, "
+                          f"DreamView={capabilities_summary['supports_dreamview']}, "
+                          f"Gradient={capabilities_summary['supports_gradient']}, "
+                          f"Music={capabilities_summary['supports_music']}")
 
             self.config.api_key = api_key
             self.config.devices = discovered_devices

@@ -1,6 +1,6 @@
 {
-    "driver_id": "uc_intg_govee",
-    "version": "0.1.1",
+    "driver_id": "uc-intg-govee",
+    "version": "0.2.0",
     "min_core_api": "0.21.0",
     "name": {
         "en": "Govee Smart Home Devices",
@@ -8,9 +8,9 @@
         "fr": "Appareils Domestiques Intelligents Govee"
     },
     "description": {
-        "en": "Control Govee smart home devices including lights, switches, sensors, and appliances via Cloud API",
-        "de": "Steuern Sie Govee Smart-Home-Geräte einschließlich Lichter, Schalter, Sensoren und Geräte über Cloud-API",
-        "fr": "Contrôlez les appareils domestiques intelligents Govee, y compris les lumières, interrupteurs, capteurs et appareils via l'API Cloud"
+        "en": "Control Govee smart home devices including lights, switches, sensors, appliances, and Sync Boxes via Cloud API",
+        "de": "Steuern Sie Govee Smart-Home-Geräte einschließlich Lichter, Schalter, Sensoren, Geräte und Sync Boxes über Cloud-API",
+        "fr": "Contrôlez les appareils domestiques intelligents Govee, y compris les lumières, interrupteurs, capteurs, appareils et Sync Boxes via l'API Cloud"
     },
     "developer": {
         "name": "Meir Miyara",
@@ -41,7 +41,7 @@
             }
         ]
     },
-    "release_date": "2025-01-17",
+    "release_date": "2025-10-23",
     "icon": "uc:g",
     "enabled": true,
     "port": 9090,

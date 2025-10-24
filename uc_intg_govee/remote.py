@@ -63,6 +63,18 @@ class GoveeRemote:
             if device_info.get("supports_power"):
                 commands.extend([f"{clean_name}_ON", f"{clean_name}_OFF", f"{clean_name}_TOGGLE"])
             
+            if device_info.get("type") == "sync_box":
+                if device_info.get("supports_dreamview"):
+                    commands.extend([f"{clean_name}_DREAMVIEW_ON", f"{clean_name}_DREAMVIEW_OFF"])
+                if device_info.get("supports_gradient"):
+                    commands.extend([f"{clean_name}_GRADIENT_ON", f"{clean_name}_GRADIENT_OFF"])
+                if device_info.get("supports_music"):
+                    music_modes = device_info.get("music_modes", [])
+                    for mode in music_modes:
+                        mode_name = mode.get("name", "").upper().replace(" ", "_")
+                        commands.append(f"{clean_name}_MUSIC_{mode_name}")
+                    commands.extend([f"{clean_name}_SENSITIVITY_UP", f"{clean_name}_SENSITIVITY_DOWN"])
+            
             if device_info.get("supports_brightness"):
                 commands.extend([f"{clean_name}_BRIGHTNESS_UP", f"{clean_name}_BRIGHTNESS_DOWN", 
                                f"{clean_name}_BRIGHTNESS_25", f"{clean_name}_BRIGHTNESS_50", 
@@ -127,7 +139,7 @@ class GoveeRemote:
         return mappings
     
     def _find_primary_device(self) -> Dict[str, Any]:
-        priority_types = ["light", "kettle", "humidifier", "heater", "switch", "socket", "sensor"]
+        priority_types = ["sync_box", "light", "kettle", "humidifier", "heater", "switch", "socket", "sensor"]
         
         for device_type in priority_types:
             for device_info in self._discovered_devices.values():
@@ -210,9 +222,15 @@ class GoveeRemote:
         device_type = first_device.get("type", "")
         
         type_names = {
-            "kettle": "Kettles", "light": "Lights", "humidifier": "Humidifiers",
-            "heater": "Heaters", "switch": "Switches", "socket": "Smart Plugs",
-            "sensor": "Sensors", "thermometer": "Thermometers"
+            "sync_box": "Sync Boxes",
+            "kettle": "Kettles", 
+            "light": "Lights", 
+            "humidifier": "Humidifiers",
+            "heater": "Heaters", 
+            "switch": "Switches", 
+            "socket": "Smart Plugs",
+            "sensor": "Sensors", 
+            "thermometer": "Thermometers"
         }
         
         friendly_name = type_names.get(device_type, "Devices")
@@ -242,7 +260,11 @@ class GoveeRemote:
         
         y = 1
         
-        if len(devices) == 1:
+        first_device = next(iter(devices.values()))
+        if first_device.get("type") == "sync_box":
+            device_id, device_info = next(iter(devices.items()))
+            y = self._add_sync_box_controls(page, device_id, device_info, start_y=y)
+        elif len(devices) == 1:
             device_id, device_info = next(iter(devices.items()))
             y = self._add_device_controls_to_page(page, device_id, device_info, start_y=y)
         else:
@@ -250,6 +272,59 @@ class GoveeRemote:
         
         _LOG.info(f"Created SKU page for {sku}: {len(devices)} devices, {y} rows used")
         return page
+    
+    def _add_sync_box_controls(self, page: UiPage, device_id: str, device_info: Dict[str, Any], start_y: int) -> int:
+        device_name = device_info.get("name", f"Device {device_id}")
+        clean_name = self._clean_command_name(device_name)
+        x, y = 0, start_y
+        
+        if device_info.get("supports_power"):
+            page.add(create_ui_text("On", x, y, Size(1, 1), f"{clean_name}_ON"))
+            page.add(create_ui_text("Off", x + 1, y, Size(1, 1), f"{clean_name}_OFF"))
+            page.add(create_ui_text("Toggle", x + 2, y, Size(2, 1), f"{clean_name}_TOGGLE"))
+            y += 1
+        
+        if device_info.get("supports_dreamview"):
+            page.add(create_ui_text("DreamView", 0, y, Size(2, 1), f"{clean_name}_DREAMVIEW_ON"))
+            page.add(create_ui_text("DV Off", 2, y, Size(2, 1), f"{clean_name}_DREAMVIEW_OFF"))
+            y += 1
+        
+        if device_info.get("supports_gradient"):
+            page.add(create_ui_text("Gradient", 0, y, Size(2, 1), f"{clean_name}_GRADIENT_ON"))
+            page.add(create_ui_text("Grad Off", 2, y, Size(2, 1), f"{clean_name}_GRADIENT_OFF"))
+            y += 1
+        
+        if device_info.get("supports_music"):
+            music_modes = device_info.get("music_modes", [])
+            for i, mode in enumerate(music_modes[:4]):
+                if y >= 6:
+                    break
+                mode_name = mode.get("name", f"Mode{i+1}")
+                display_name = mode_name[:7]
+                cmd = f"{clean_name}_MUSIC_{mode_name.upper().replace(' ', '_')}"
+                page.add(create_ui_text(display_name, i % 4, y, Size(1, 1), cmd))
+            y += 1
+            
+            if y < 6:
+                page.add(create_ui_text("Sens -", 0, y, Size(2, 1), f"{clean_name}_SENSITIVITY_DOWN"))
+                page.add(create_ui_text("Sens +", 2, y, Size(2, 1), f"{clean_name}_SENSITIVITY_UP"))
+                y += 1
+        
+        if device_info.get("supports_brightness") and y < 5:
+            page.add(create_ui_text("25%", 0, y, Size(1, 1), f"{clean_name}_BRIGHTNESS_25"))
+            page.add(create_ui_text("50%", 1, y, Size(1, 1), f"{clean_name}_BRIGHTNESS_50"))
+            page.add(create_ui_text("75%", 2, y, Size(1, 1), f"{clean_name}_BRIGHTNESS_75"))
+            page.add(create_ui_text("100%", 3, y, Size(1, 1), f"{clean_name}_BRIGHTNESS_100"))
+            y += 1
+        
+        if device_info.get("supports_color") and y < 5:
+            page.add(create_ui_text("Red", 0, y, Size(1, 1), f"{clean_name}_COLOR_RED"))
+            page.add(create_ui_text("Green", 1, y, Size(1, 1), f"{clean_name}_COLOR_GREEN"))
+            page.add(create_ui_text("Blue", 2, y, Size(1, 1), f"{clean_name}_COLOR_BLUE"))
+            page.add(create_ui_text("White", 3, y, Size(1, 1), f"{clean_name}_COLOR_WHITE"))
+            y += 1
+        
+        return y
     
     def _add_device_controls_to_page(self, page: UiPage, device_id: str, device_info: Dict[str, Any], start_y: int) -> int:
         device_name = device_info.get("name", f"Device {device_id}")
@@ -363,7 +438,6 @@ class GoveeRemote:
         _LOG.info(f"Initial state set successfully - remote entity is {initial_state}")
 
     async def _get_device_state(self, device_id: str) -> bool:
-        """Get the current state of a device. Returns True if on, False if off."""
         try:
             device_info = self._discovered_devices.get(device_id)
             if not device_info:
@@ -382,25 +456,21 @@ class GoveeRemote:
             device = GoveeDevice(device_data)
             state_data = await self._client.get_device_state(device)
         
-            # Parse the state from Govee API response
             if state_data and 'capabilities' in state_data:
                 for capability in state_data['capabilities']:
                     if capability.get('type') == 'devices.capabilities.on_off' and capability.get('instance') == 'powerSwitch':
                         value = capability.get('state', {}).get('value', 0)
                         is_on = bool(value)
-                        # Cache the state
                         self._device_states[device_id] = is_on
                         _LOG.debug(f"Device {device_id} state from API: {is_on}")
                         return is_on
         
-            # Fallback to cached state or assume off
             cached_state = self._device_states.get(device_id, False)
             _LOG.debug(f"Device {device_id} using cached state: {cached_state}")
             return cached_state
         
         except Exception as e:
             _LOG.warning(f"Failed to get state for device {device_id}: {e}")
-            # Return cached state or assume off
             return self._device_states.get(device_id, False)
         
     async def _check_throttle(self, device_id: str) -> bool:
@@ -523,18 +593,15 @@ class GoveeRemote:
                     self._device_states[device_id] = False
                 return result
             elif action == "toggle":
-                # Get current state and toggle appropriately
                 current_state = await self._get_device_state(device_id)
                 _LOG.info(f"Toggle for {device_name}: current state is {'ON' if current_state else 'OFF'}")
                 
                 if current_state:
-                    # Device is on, turn it off
                     result = await self._client.turn_off(device)
                     if result:
                         self._device_states[device_id] = False
                         _LOG.info(f"Toggled {device_name} OFF")
                 else:
-                    # Device is off, turn it on
                     result = await self._client.turn_on(device)
                     if result:
                         self._device_states[device_id] = True
@@ -596,19 +663,16 @@ class GoveeRemote:
                     self._device_states[device_id] = False
                 return result
             elif action == "toggle":
-                # Proper toggle implementation
                 if device_id:
                     current_state = await self._get_device_state(device_id)
                     _LOG.info(f"Toggle for {device.device_name}: current state is {'ON' if current_state else 'OFF'}")
                     
                     if current_state:
-                        # Device is on, turn it off
                         result = await self._client.turn_off(device)
                         if result:
                             self._device_states[device_id] = False
                             _LOG.info(f"Toggled {device.device_name} OFF")
                     else:
-                        # Device is off, turn it on
                         result = await self._client.turn_on(device)
                         if result:
                             self._device_states[device_id] = True
@@ -616,8 +680,26 @@ class GoveeRemote:
                     
                     return result
                 else:
-                    # Fallback if device_id not available - just turn on
                     return await self._client.turn_on(device)
+            elif action == "dreamview_on":
+                return await self._client.set_dreamview(device, True)
+            elif action == "dreamview_off":
+                return await self._client.set_dreamview(device, False)
+            elif action == "gradient_on":
+                return await self._client.set_gradient(device, True)
+            elif action == "gradient_off":
+                return await self._client.set_gradient(device, False)
+            elif action.startswith("music_"):
+                mode_name = action.replace("music_", "").replace("_", " ").title()
+                music_modes = device_info.get("music_modes", [])
+                for mode in music_modes:
+                    if mode.get("name", "").lower() == mode_name.lower():
+                        return await self._client.set_music_mode(device, mode.get("value", 1), 50)
+                return False
+            elif action == "sensitivity_up":
+                return await self._client.set_music_mode(device, 1, 75)
+            elif action == "sensitivity_down":
+                return await self._client.set_music_mode(device, 1, 25)
             elif action.startswith("brightness_"):
                 if "up" in action:
                     brightness = 100
@@ -689,6 +771,18 @@ class GoveeRemote:
             return "turn_off" if device_info.get("supports_power") else None
         elif ui_action == "TOGGLE":
             return "toggle" if device_info.get("supports_power") else None
+        elif ui_action == "DREAMVIEW_ON":
+            return "dreamview_on" if device_info.get("supports_dreamview") else None
+        elif ui_action == "DREAMVIEW_OFF":
+            return "dreamview_off" if device_info.get("supports_dreamview") else None
+        elif ui_action == "GRADIENT_ON":
+            return "gradient_on" if device_info.get("supports_gradient") else None
+        elif ui_action == "GRADIENT_OFF":
+            return "gradient_off" if device_info.get("supports_gradient") else None
+        elif ui_action.startswith("MUSIC_"):
+            return ui_action.lower() if device_info.get("supports_music") else None
+        elif ui_action in ["SENSITIVITY_UP", "SENSITIVITY_DOWN"]:
+            return ui_action.lower() if device_info.get("supports_music") else None
         elif ui_action.startswith("BRIGHTNESS_"):
             if not device_info.get("supports_brightness"):
                 return None
