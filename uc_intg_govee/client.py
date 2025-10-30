@@ -34,8 +34,10 @@ class GoveeDevice:
         self.capabilities = data.get("capabilities", [])
         
         self.api_type = data.get("type", "")
-        self.device_type = self._determine_device_type()
         
+        # FIX: Set all capability attributes BEFORE determining device type
+        # _determine_device_type() depends on these attributes being set first
+        # Previously this caused AttributeError: 'GoveeDevice' object has no attribute 'supports_color'
         self.supports_power = self._has_capability("devices.capabilities.on_off")
         self.supports_brightness = self._has_capability("devices.capabilities.range", "brightness")
         self.supports_color = self._has_capability("devices.capabilities.color_setting", "colorRgb")
@@ -50,6 +52,9 @@ class GoveeDevice:
         self.supports_gradient = self._has_capability("devices.capabilities.toggle", "gradientToggle")
         self.supports_dreamview = self._has_capability("devices.capabilities.toggle", "dreamViewToggle")
         self.supports_segmented = self._has_capability("devices.capabilities.segment_color_setting")
+        
+        # NOW determine device type after all capabilities are set
+        self.device_type = self._determine_device_type()
 
     def _determine_device_type(self) -> str:
         if self.sku in ["H6603", "H6604", "H8604"]:
