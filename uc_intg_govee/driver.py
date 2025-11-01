@@ -165,9 +165,31 @@ async def main():
             govee_client._api_key = govee_config.api_key
             govee_client._headers["Govee-API-Key"] = govee_config.api_key
             
-            if await govee_client.test_connection():
-                _LOG.info("Govee connection successful")
+            # FIX: Add retry logic with exponential backoff for initial connection
+            # This solves the issue where entities become unavailable after reboot
+            connection_successful = False
+            max_retries = 5
+            retry_delay = 2  # Start with 2 seconds
+            
+            for attempt in range(max_retries):
+                try:
+                    _LOG.info(f"Testing Govee API connection (attempt {attempt + 1}/{max_retries})...")
+                    if await govee_client.test_connection():
+                        _LOG.info("Govee connection successful")
+                        connection_successful = True
+                        break
+                    else:
+                        _LOG.warning(f"Connection test failed on attempt {attempt + 1}/{max_retries}")
+                except Exception as e:
+                    _LOG.warning(f"Connection attempt {attempt + 1}/{max_retries} failed: {e}")
                 
+                # If not the last attempt, wait before retrying
+                if attempt < max_retries - 1:
+                    wait_time = retry_delay * (2 ** attempt)  # Exponential backoff: 2s, 4s, 8s, 16s, 32s
+                    _LOG.info(f"Waiting {wait_time}s before retry...")
+                    await asyncio.sleep(wait_time)
+            
+            if connection_successful:
                 discovered_devices = govee_config.devices
                 if discovered_devices:
                     _LOG.info(f"Found {len(discovered_devices)} configured devices")
@@ -176,7 +198,8 @@ async def main():
                     _LOG.warning("No devices found in configuration")
                     await api.set_device_state(ucapi.DeviceStates.ERROR)
             else:
-                _LOG.error("Cannot connect to Govee API with stored credentials")
+                _LOG.error("Cannot connect to Govee API after all retry attempts")
+                _LOG.error("Entities will not be available until manual reconfiguration")
                 await api.set_device_state(ucapi.DeviceStates.ERROR)
         else:
             _LOG.warning("Integration is not configured. Waiting for setup...")
