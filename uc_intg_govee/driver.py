@@ -47,12 +47,6 @@ async def on_setup_complete():
             _LOG.error("Govee client is not configured after setup")
             await api.set_device_state(ucapi.DeviceStates.ERROR)
             return
-
-        if not await govee_client.test_connection():
-            _LOG.error("Govee connection test failed after setup")
-            await api.set_device_state(ucapi.DeviceStates.ERROR)
-            return
-
         discovered_devices = govee_config.devices
         _LOG.info(f"Creating entities for {len(discovered_devices)} discovered devices")
         
