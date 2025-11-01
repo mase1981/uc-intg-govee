@@ -32,8 +32,17 @@ govee_client: Optional[GoveeClient] = None
 govee_config: Optional[GoveeConfig] = None
 remote: Optional[GoveeRemote] = None
 
+# ============================================================================
+# FIX: Entity persistence flag to prevent race conditions
+# ============================================================================
+# Track whether entities have been created to handle UC Remote subscription
+# attempts that occur before entity creation completes
+entities_initialized = False
+initialization_lock = asyncio.Lock()
+# ============================================================================
+
 async def create_entities_from_config():
-    global remote, entities_initialized
+    global remote, entities_initialized, initialization_lock
     
     async with initialization_lock:
         if entities_initialized:
@@ -55,12 +64,10 @@ async def create_entities_from_config():
             for device_id, device_info in discovered_devices.items():
                 _LOG.debug(f"Device {device_id}: {device_info.get('name')} ({device_info.get('type')}) - SKU: {device_info.get('sku')}")
             
-            # Create remote entity IMMEDIATELY - don't wait for connection test
             remote = GoveeRemote(api, govee_client, govee_config)
             api.available_entities.add(remote.entity)
             _LOG.info(f"Pre-created remote entity: {remote.entity.id}")
             
-            # Mark entities as initialized BEFORE setting state
             entities_initialized = True
             _LOG.info("Entities initialized and ready for subscription")
             
@@ -69,11 +76,6 @@ async def create_entities_from_config():
             entities_initialized = False
 
 async def verify_and_set_connection_state():
-    """Verify Govee API connection and set appropriate device state.
-    
-    This runs AFTER entities are created to update connection status.
-    Uses retry logic to handle network timing issues during boot.
-    """
     if not govee_config or not govee_config.is_configured():
         _LOG.warning("Integration is not configured")
         await api.set_device_state(ucapi.DeviceStates.ERROR)
@@ -116,11 +118,6 @@ async def verify_and_set_connection_state():
         await api.set_device_state(ucapi.DeviceStates.ERROR)
 
 async def on_setup_complete():
-    """Callback executed when driver setup is complete.
-    
-    This is called after INITIAL setup (not on reboot).
-    For reboots, entities are pre-created in main() to avoid race conditions.
-    """
     global entities_initialized
     
     _LOG.info("Setup complete. Creating entities...")
