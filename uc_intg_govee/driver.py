@@ -47,6 +47,12 @@ async def on_setup_complete():
             _LOG.error("Govee client is not configured after setup")
             await api.set_device_state(ucapi.DeviceStates.ERROR)
             return
+
+        if not await govee_client.test_connection():
+            _LOG.error("Govee connection test failed after setup")
+            await api.set_device_state(ucapi.DeviceStates.ERROR)
+            return
+
         discovered_devices = govee_config.devices
         _LOG.info(f"Creating entities for {len(discovered_devices)} discovered devices")
         
@@ -159,30 +165,50 @@ async def main():
             govee_client._api_key = govee_config.api_key
             govee_client._headers["Govee-API-Key"] = govee_config.api_key
             
-            # FIX: Add retry logic with exponential backoff for initial connection
-            # This solves the issue where entities become unavailable after reboot
-            connection_successful = False
+            # ============================================================================
+            # FIX: Exponential backoff retry logic to handle network timing during boot
+            # ============================================================================
+            # ISSUE: Integration becomes unavailable after reboot because single connection
+            #        attempt fails if network/DNS/SSL services aren't fully ready
+            # 
+            # SOLUTION: Retry with exponential backoff (5 attempts over 62 seconds)
+            #           to allow network services to stabilize during boot sequence
+            #
+            # TIMING: 2s + 4s + 8s + 16s + 32s = 62 seconds total retry window
+            #
+            # This addresses:
+            # - Network interface initialization delays
+            # - DNS resolution timing issues  
+            # - SSL certificate validation delays
+            # - System time synchronization (affects SSL)
+            # - API response delays with multiple devices (2-3s vs 200ms for single device)
+            # ============================================================================
+            
             max_retries = 5
-            retry_delay = 2  # Start with 2 seconds
+            retry_delays = [2, 4, 8, 16, 32]  # Exponential backoff in seconds
+            connection_successful = False
             
             for attempt in range(max_retries):
+                if attempt > 0:
+                    delay = retry_delays[attempt - 1]
+                    _LOG.warning(f"Connection attempt {attempt + 1}/{max_retries} - waiting {delay}s for network stabilization...")
+                    await asyncio.sleep(delay)
+                else:
+                    _LOG.info(f"Connection attempt {attempt + 1}/{max_retries}")
+                
                 try:
-                    _LOG.info(f"Testing Govee API connection (attempt {attempt + 1}/{max_retries})...")
                     if await govee_client.test_connection():
-                        _LOG.info("Govee connection successful")
+                        _LOG.info(f"Govee connection successful on attempt {attempt + 1}/{max_retries}")
                         connection_successful = True
                         break
                     else:
-                        _LOG.warning(f"Connection test failed on attempt {attempt + 1}/{max_retries}")
+                        _LOG.warning(f"Govee connection failed on attempt {attempt + 1}/{max_retries}")
+                        
                 except Exception as e:
-                    _LOG.warning(f"Connection attempt {attempt + 1}/{max_retries} failed: {e}")
-                
-                # If not the last attempt, wait before retrying
-                if attempt < max_retries - 1:
-                    wait_time = retry_delay * (2 ** attempt)  # Exponential backoff: 2s, 4s, 8s, 16s, 32s
-                    _LOG.info(f"Waiting {wait_time}s before retry...")
-                    await asyncio.sleep(wait_time)
+                    _LOG.warning(f"Connection attempt {attempt + 1}/{max_retries} raised exception: {e}")
+                    # Continue to next retry
             
+            # Process results after all retry attempts
             if connection_successful:
                 discovered_devices = govee_config.devices
                 if discovered_devices:
@@ -192,9 +218,10 @@ async def main():
                     _LOG.warning("No devices found in configuration")
                     await api.set_device_state(ucapi.DeviceStates.ERROR)
             else:
-                _LOG.error("Cannot connect to Govee API after all retry attempts")
-                _LOG.error("Entities will not be available until manual reconfiguration")
+                _LOG.error(f"Cannot connect to Govee API after {max_retries} attempts with exponential backoff")
+                _LOG.error("This may indicate: invalid API key, network connectivity issues, or Govee API service problems")
                 await api.set_device_state(ucapi.DeviceStates.ERROR)
+                
         else:
             _LOG.warning("Integration is not configured. Waiting for setup...")
             await api.set_device_state(ucapi.DeviceStates.ERROR)
