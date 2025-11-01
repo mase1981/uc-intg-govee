@@ -1,6 +1,6 @@
 {
     "driver_id": "uc-intg-govee",
-    "version": "0.2.2",
+    "version": "0.2.3",
     "min_core_api": "0.21.0",
     "name": {
         "en": "Govee Smart Home Devices",
