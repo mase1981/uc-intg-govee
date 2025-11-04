@@ -19,8 +19,6 @@ _LOG = logging.getLogger(__name__)
 
 
 class GoveeRemote:
-    """Govee remote entity with scalable SKU-based UI organization."""
-    
     def __init__(self, api: ucapi.IntegrationAPI, client: GoveeClient, config: 'GoveeConfig'):
         self._api = api
         self._client = client
@@ -540,34 +538,55 @@ class GoveeRemote:
             return False
     
     async def _execute_global_command(self, command: str) -> bool:
-        tasks = []
+        _LOG.info(f"Executing global command: {command} on {len(self._discovered_devices)} devices")
+        
+        success_count = 0
+        failed_devices = []
         
         for device_id, device_info in self._discovered_devices.items():
-            if device_info.get("supports_power", True):
+            if not device_info.get("supports_power", True):
+                continue
+                
+            device_name = device_info.get('name', f'Device_{device_id}')
+            
+            try:
                 if command == "ALL_ON":
-                    task = self._execute_device_action_safe(device_id, "turn_on", device_info.get('name'))
+                    result = await self._execute_device_action_safe(device_id, "turn_on", device_name)
                 elif command == "ALL_OFF":
-                    task = self._execute_device_action_safe(device_id, "turn_off", device_info.get('name'))
+                    result = await self._execute_device_action_safe(device_id, "turn_off", device_name)
                 elif command == "ALL_TOGGLE":
-                    task = self._execute_device_action_safe(device_id, "toggle", device_info.get('name'))
+                    result = await self._execute_device_action_safe(device_id, "toggle", device_name)
                 else:
                     continue
-                tasks.append(task)
+                
+                if result:
+                    success_count += 1
+                    _LOG.debug(f"Global command {command} succeeded for {device_name}")
+                else:
+                    failed_devices.append(device_name)
+                    _LOG.warning(f"Global command {command} failed for {device_name}")
+                await asyncio.sleep(0.35)
+                
+            except Exception as e:
+                failed_devices.append(device_name)
+                _LOG.error(f"Exception executing global command {command} on {device_name}: {e}")
         
-        if tasks:
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            success_count = sum(1 for result in results if result is True)
-            return success_count > 0
+        _LOG.info(f"Global command {command} completed: {success_count} succeeded, {len(failed_devices)} failed")
+        if failed_devices:
+            _LOG.warning(f"Failed devices: {', '.join(failed_devices)}")
         
-        return False
+        return success_count > 0
     
     async def _execute_device_action_safe(self, device_id: str, action: str, device_name: str) -> bool:
         try:
+            # Check throttle - if throttled, return False instead of True
             if not await self._check_throttle(device_id):
-                return True
+                _LOG.debug(f"Command {action} for {device_name} throttled")
+                return False  # ✅ FIXED: Return False when throttled
             
             device_info = self._discovered_devices.get(device_id)
             if not device_info:
+                _LOG.error(f"Device {device_id} not found in discovered devices")
                 return False
             
             from uc_intg_govee.client import GoveeDevice
@@ -586,12 +605,16 @@ class GoveeRemote:
                 result = await self._client.turn_on(device)
                 if result:
                     self._device_states[device_id] = True
+                    _LOG.debug(f"Successfully turned on {device_name}")
                 return result
+                
             elif action == "turn_off":
                 result = await self._client.turn_off(device)
                 if result:
                     self._device_states[device_id] = False
+                    _LOG.debug(f"Successfully turned off {device_name}")
                 return result
+                
             elif action == "toggle":
                 current_state = await self._get_device_state(device_id)
                 _LOG.info(f"Toggle for {device_name}: current state is {'ON' if current_state else 'OFF'}")
@@ -609,10 +632,11 @@ class GoveeRemote:
                 
                 return result
             else:
+                _LOG.warning(f"Unknown action: {action}")
                 return False
                 
         except Exception as e:
-            _LOG.error(f"Error executing {action} on device {device_name}: {e}")
+            _LOG.error(f"Error executing {action} on device {device_name}: {e}", exc_info=True)
             return False
     
     async def _execute_device_command(self, command: str) -> bool:
