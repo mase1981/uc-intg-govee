@@ -34,10 +34,6 @@ class GoveeDevice:
         self.capabilities = data.get("capabilities", [])
         
         self.api_type = data.get("type", "")
-        
-        # FIX: Set all capability attributes BEFORE determining device type
-        # _determine_device_type() depends on these attributes being set first
-        # Previously this caused AttributeError: 'GoveeDevice' object has no attribute 'supports_color'
         self.supports_power = self._has_capability("devices.capabilities.on_off")
         self.supports_brightness = self._has_capability("devices.capabilities.range", "brightness")
         self.supports_color = self._has_capability("devices.capabilities.color_setting", "colorRgb")
@@ -53,7 +49,6 @@ class GoveeDevice:
         self.supports_dreamview = self._has_capability("devices.capabilities.toggle", "dreamViewToggle")
         self.supports_segmented = self._has_capability("devices.capabilities.segment_color_setting")
         
-        # NOW determine device type after all capabilities are set
         self.device_type = self._determine_device_type()
 
     def _determine_device_type(self) -> str:
@@ -354,12 +349,15 @@ class GoveeClient:
         _LOG.debug(f"Getting state for device: {device.device_id}")
         
         try:
-            params = {
-                "sku": device.sku,
-                "device": device.device_id
+            state_query = {
+                "requestId": "uc_integration_state_query",
+                "payload": {
+                    "sku": device.sku,
+                    "device": device.device_id
+                }
             }
             
-            response = await self._make_request("GET", "/router/api/v1/device/state", params)
+            response = await self._make_request("POST", "/router/api/v1/device/state", state_query)
             return response.get("data", {})
             
         except GoveeAPIError as e:
