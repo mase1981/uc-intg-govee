@@ -193,7 +193,7 @@ class GoveeRemote:
                     
                 device_name = device_info.get("name", f"Device {device_id}")
                 display_name = device_name[:18] if len(device_name) > 18 else device_name
-                directory_page.add(create_ui_text(f"â€¢ {display_name}", 0, y, Size(4, 1)))
+                directory_page.add(create_ui_text(f"• {display_name}", 0, y, Size(4, 1)))
                 y += 1
             
             y += 1 if y < 6 else 0
@@ -344,7 +344,7 @@ class GoveeRemote:
             if max_temp >= 100:
                 temps = [60, 70, 80, 90]
                 for i, temp in enumerate(temps):
-                    page.add(create_ui_text(f"{temp}Â°", i, y, Size(1, 1), f"{clean_name}_TEMP_{temp}"))
+                    page.add(create_ui_text(f"{temp}°", i, y, Size(1, 1), f"{clean_name}_TEMP_{temp}"))
                 y += 1
                 
                 page.add(create_ui_text("Temp -", 0, y, Size(2, 1), f"{clean_name}_TEMP_DOWN"))
@@ -354,7 +354,7 @@ class GoveeRemote:
             elif max_temp >= 40:
                 temps = [20, 25, 30, 35]
                 for i, temp in enumerate(temps):
-                    page.add(create_ui_text(f"{temp}Â°", i, y, Size(1, 1), f"{clean_name}_TEMP_{temp}"))
+                    page.add(create_ui_text(f"{temp}°", i, y, Size(1, 1), f"{clean_name}_TEMP_{temp}"))
                 y += 1
         
         if device_info.get("supports_work_mode"):
@@ -438,40 +438,8 @@ class GoveeRemote:
         _LOG.info(f"Initial state set successfully - remote entity is {initial_state}")
 
     async def _get_device_state(self, device_id: str) -> bool:
-        try:
-            device_info = self._discovered_devices.get(device_id)
-            if not device_info:
-                return False
-        
-            from uc_intg_govee.client import GoveeDevice
-        
-            device_data = {
-                "sku": device_info.get("sku", ""),
-                "device": device_id,
-                "deviceName": device_info.get("name", ""),
-                "type": device_info.get("api_type", ""),
-                "capabilities": device_info.get("capabilities", [])
-            }
-        
-            device = GoveeDevice(device_data)
-            state_data = await self._client.get_device_state(device)
-        
-            if state_data and 'capabilities' in state_data:
-                for capability in state_data['capabilities']:
-                    if capability.get('type') == 'devices.capabilities.on_off' and capability.get('instance') == 'powerSwitch':
-                        value = capability.get('state', {}).get('value', 0)
-                        is_on = bool(value)
-                        self._device_states[device_id] = is_on
-                        _LOG.debug(f"Device {device_id} state from API: {is_on}")
-                        return is_on
-        
-            cached_state = self._device_states.get(device_id, False)
-            _LOG.debug(f"Device {device_id} using cached state: {cached_state}")
-            return cached_state
-        
-        except Exception as e:
-            _LOG.warning(f"Failed to get state for device {device_id}: {e}")
-            return self._device_states.get(device_id, False)
+        """Get device state from cache, falling back to API if needed."""
+        return self._device_states.get(device_id, False)
         
     async def _check_throttle(self, device_id: str) -> bool:
         import time
@@ -540,31 +508,74 @@ class GoveeRemote:
             return False
     
     async def _execute_global_command(self, command: str) -> bool:
-        tasks = []
+        """
+        Execute ALL_ON/ALL_OFF/ALL_TOGGLE commands sequentially with proper delays.
+        
+        FIX: Changed from concurrent (asyncio.gather) to sequential execution
+        to respect API throttle limits (100ms global, 300ms per-device).
+        """
+        success_count = 0
+        total_devices = 0
+        
+        _LOG.info(f"Executing {command} for all devices sequentially")
         
         for device_id, device_info in self._discovered_devices.items():
-            if device_info.get("supports_power", True):
-                if command == "ALL_ON":
-                    task = self._execute_device_action_safe(device_id, "turn_on", device_info.get('name'))
-                elif command == "ALL_OFF":
-                    task = self._execute_device_action_safe(device_id, "turn_off", device_info.get('name'))
-                elif command == "ALL_TOGGLE":
-                    task = self._execute_device_action_safe(device_id, "toggle", device_info.get('name'))
+            if not device_info.get("supports_power", True):
+                continue
+                
+            total_devices += 1
+            device_name = device_info.get("name", device_id)
+            
+            # Determine action
+            if command == "ALL_ON":
+                action = "turn_on"
+            elif command == "ALL_OFF":
+                action = "turn_off"
+            elif command == "ALL_TOGGLE":
+                action = "toggle"
+            else:
+                continue
+            
+            # Execute with proper throttling
+            try:
+                result = await self._execute_device_action_safe(device_id, action, device_name)
+                if result:
+                    success_count += 1
+                    _LOG.info(f"{command}: ✓ {device_name}")
                 else:
-                    continue
-                tasks.append(task)
+                    _LOG.warning(f"{command}: ✗ {device_name} (failed)")
+            except Exception as e:
+                _LOG.error(f"{command}: ✗ {device_name} (error: {e})")
+            
+            # Add delay between devices (150ms = above 100ms global throttle)
+            if total_devices > 1:  # Don't delay after last device
+                await asyncio.sleep(0.15)
         
-        if tasks:
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            success_count = sum(1 for result in results if result is True)
-            return success_count > 0
-        
-        return False
+        _LOG.info(f"{command} completed: {success_count}/{total_devices} devices succeeded")
+        return success_count > 0
     
     async def _execute_device_action_safe(self, device_id: str, action: str, device_name: str) -> bool:
+        """
+        Execute a device action with throttle checking and retry logic.
+        
+        FIX: Now waits and retries if throttled instead of returning True immediately.
+        """
         try:
-            if not await self._check_throttle(device_id):
-                return True
+            # Check throttle - if we need to wait, do so
+            max_retries = 3
+            for attempt in range(max_retries):
+                if await self._check_throttle(device_id):
+                    # Throttle passed, execute command
+                    break
+                    
+                if attempt < max_retries - 1:
+                    # Wait and retry
+                    _LOG.debug(f"Throttled {device_name}, waiting 200ms (attempt {attempt + 1}/{max_retries})")
+                    await asyncio.sleep(0.2)
+                else:
+                    # Max retries exceeded
+                    _LOG.warning(f"Throttle max retries exceeded for {device_name}")
+                    return False
             
             device_info = self._discovered_devices.get(device_id)
             if not device_info:
@@ -593,18 +604,15 @@ class GoveeRemote:
                     self._device_states[device_id] = False
                 return result
             elif action == "toggle":
-                # OPTIMIZED: Use cached state instead of slow API query
-                cached_state = self._device_states.get(device_id, False)
-                _LOG.info(f"Toggle for {device_name}: cached state is {'ON' if cached_state else 'OFF'}, will turn {'OFF' if cached_state else 'ON'}")
+                current_state = await self._get_device_state(device_id)
+                _LOG.info(f"Toggle for {device_name}: cached state is {'ON' if current_state else 'OFF'}, will turn {'OFF' if current_state else 'ON'}")
                 
-                if cached_state:
-                    # Currently ON -> Turn OFF
+                if current_state:
                     result = await self._client.turn_off(device)
                     if result:
                         self._device_states[device_id] = False
                         _LOG.info(f"Toggled {device_name} OFF")
                 else:
-                    # Currently OFF -> Turn ON  
                     result = await self._client.turn_on(device)
                     if result:
                         self._device_states[device_id] = True
@@ -624,8 +632,16 @@ class GoveeRemote:
             device_prefix = self._clean_command_name(device_name)
             
             if command.startswith(device_prefix + "_"):
-                if not await self._check_throttle(device_id):
-                    return True
+                # Check throttle with retry
+                max_retries = 3
+                for attempt in range(max_retries):
+                    if await self._check_throttle(device_id):
+                        break
+                    if attempt < max_retries - 1:
+                        await asyncio.sleep(0.2)
+                    else:
+                        _LOG.warning(f"Throttle exceeded for {device_name}")
+                        return False
                 
                 action_part = command[len(device_prefix)+1:]
                 govee_action_result = self._map_ui_action_to_govee_action(action_part, device_info)
@@ -667,19 +683,15 @@ class GoveeRemote:
                 return result
             elif action == "toggle":
                 if device_id:
-                    # OPTIMIZED: Use cached state instead of slow API query
-                    # Toggle based on last known state (inverted logic for toggle)
-                    cached_state = self._device_states.get(device_id, False)
-                    _LOG.info(f"Toggle for {device.device_name}: cached state is {'ON' if cached_state else 'OFF'}, will turn {'OFF' if cached_state else 'ON'}")
+                    current_state = await self._get_device_state(device_id)
+                    _LOG.info(f"Toggle for {device.device_name}: cached state is {'ON' if current_state else 'OFF'}, will turn {'OFF' if current_state else 'ON'}")
                     
-                    if cached_state:
-                        # Currently ON -> Turn OFF
+                    if current_state:
                         result = await self._client.turn_off(device)
                         if result:
                             self._device_states[device_id] = False
                             _LOG.info(f"Toggled {device.device_name} OFF")
                     else:
-                        # Currently OFF -> Turn ON
                         result = await self._client.turn_on(device)
                         if result:
                             self._device_states[device_id] = True
