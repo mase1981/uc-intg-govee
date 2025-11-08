@@ -56,6 +56,7 @@ class GoveeRemote:
         if not self._discovered_devices:
             return ["NO_DEVICES"]
         
+        # Generate per-device commands
         for device_id, device_info in self._discovered_devices.items():
             device_name = device_info.get("name", f"Device_{device_id}")
             clean_name = self._clean_command_name(device_name)
@@ -104,8 +105,18 @@ class GoveeRemote:
                     if scene_name:
                         commands.append(f"{clean_name}_SCENE_{scene_name}")
         
+        # Generate global ALL commands (for all devices)
         if len(self._discovered_devices) > 1:
             commands.extend(["ALL_ON", "ALL_OFF", "ALL_TOGGLE"])
+        
+        # Generate SKU-specific ALL commands
+        sku_groups = self._group_devices_by_sku()
+        for sku in sku_groups.keys():
+            # Only add SKU-specific commands if there are multiple devices in that SKU
+            if len(sku_groups[sku]) > 1:
+                sku_clean = sku.replace("-", "_").upper()
+                commands.extend([f"{sku_clean}_ALL_ON", f"{sku_clean}_ALL_OFF", f"{sku_clean}_ALL_TOGGLE"])
+                _LOG.debug(f"Generated SKU commands for {sku}: {sku_clean}_ALL_ON/OFF/TOGGLE")
         
         return sorted(list(set(commands)))
     
@@ -201,6 +212,7 @@ class GoveeRemote:
         if len(self._discovered_devices) > 1 and y < 5:
             directory_page.add(create_ui_text("All On", 0, 5, Size(2, 1), "ALL_ON"))
             directory_page.add(create_ui_text("All Off", 2, 5, Size(2, 1), "ALL_OFF"))
+            _LOG.debug("Added GLOBAL All On/Off buttons to directory page")
         
         return directory_page
     
@@ -268,7 +280,7 @@ class GoveeRemote:
             device_id, device_info = next(iter(devices.items()))
             y = self._add_device_controls_to_page(page, device_id, device_info, start_y=y)
         else:
-            y = self._add_multi_device_controls_to_page(page, devices, start_y=y)
+            y = self._add_multi_device_controls_to_page(page, sku, devices, start_y=y)
         
         _LOG.info(f"Created SKU page for {sku}: {len(devices)} devices, {y} rows used")
         return page
@@ -401,7 +413,8 @@ class GoveeRemote:
         
         return y
     
-    def _add_multi_device_controls_to_page(self, page: UiPage, devices: Dict[str, Any], start_y: int) -> int:
+    def _add_multi_device_controls_to_page(self, page: UiPage, sku: str, devices: Dict[str, Any], start_y: int) -> int:
+        """Add controls for multiple devices on a single page with SKU-specific ALL commands."""
         x, y = 0, start_y
         
         for device_id, device_info in devices.items():
@@ -416,12 +429,15 @@ class GoveeRemote:
             page.add(create_ui_text("Toggle", 2, y, Size(2, 1), f"{clean_name}_TOGGLE"))
             y += 1
         
+        # Add SKU-specific All On/Off buttons
         if y < 6:
             first_device = next(iter(devices.values()))
             
             if first_device.get("supports_power"):
-                page.add(create_ui_text("All On", 0, 5, Size(2, 1), "ALL_ON"))
-                page.add(create_ui_text("All Off", 2, 5, Size(2, 1), "ALL_OFF"))
+                sku_clean = sku.replace("-", "_").upper()
+                page.add(create_ui_text("All On", 0, 5, Size(2, 1), f"{sku_clean}_ALL_ON"))
+                page.add(create_ui_text("All Off", 2, 5, Size(2, 1), f"{sku_clean}_ALL_OFF"))
+                _LOG.debug(f"Added SKU-specific buttons for {sku}: {sku_clean}_ALL_ON/OFF")
         
         return y
     
@@ -438,21 +454,60 @@ class GoveeRemote:
         _LOG.info(f"Initial state set successfully - remote entity is {initial_state}")
 
     async def _get_device_state(self, device_id: str) -> bool:
-        """Get device state from cache, falling back to API if needed."""
-        return self._device_states.get(device_id, False)
+        try:
+            device_info = self._discovered_devices.get(device_id)
+            if not device_info:
+                return False
+        
+            from uc_intg_govee.client import GoveeDevice
+        
+            device_data = {
+                "sku": device_info.get("sku", ""),
+                "device": device_id,
+                "deviceName": device_info.get("name", ""),
+                "type": device_info.get("api_type", ""),
+                "capabilities": device_info.get("capabilities", [])
+            }
+        
+            device = GoveeDevice(device_data)
+            state_data = await self._client.get_device_state(device)
+        
+            if state_data and 'capabilities' in state_data:
+                for capability in state_data['capabilities']:
+                    if capability.get('type') == 'devices.capabilities.on_off' and capability.get('instance') == 'powerSwitch':
+                        value = capability.get('state', {}).get('value', 0)
+                        is_on = bool(value)
+                        self._device_states[device_id] = is_on
+                        _LOG.debug(f"Device {device_id} state from API: {is_on}")
+                        return is_on
+        
+            cached_state = self._device_states.get(device_id, False)
+            _LOG.debug(f"Device {device_id} using cached state: {cached_state}")
+            return cached_state
+        
+        except Exception as e:
+            _LOG.warning(f"Failed to get state for device {device_id}: {e}")
+            return self._device_states.get(device_id, False)
         
     async def _check_throttle(self, device_id: str) -> bool:
+        """Check if a command can be sent to a device without violating throttle limits.
+        
+        Returns True if safe to proceed, False if throttled.
+        """
         import time
         
         current_time = time.time()
         
+        # Global throttle: 100ms between ANY commands
         if current_time - self._global_throttle < 0.1:
             return False
         
+        # Device throttle: 300ms between commands to SAME device
         last_time = self._device_throttle.get(device_id, 0)
         if current_time - last_time < 0.3:
             return False
         
+        # Update throttle timestamps
         self._global_throttle = current_time
         self._device_throttle[device_id] = current_time
         return True
@@ -494,153 +549,275 @@ class GoveeRemote:
         return ucapi.StatusCodes.OK if success else ucapi.StatusCodes.SERVER_ERROR
     
     async def _execute_govee_command(self, command: str) -> bool:
+        """Route commands to appropriate handlers."""
         try:
             if not self._discovered_devices or command == "NO_DEVICES":
                 return False
             
+            _LOG.info(f"🎯 EXECUTING COMMAND: {command}")
+            
+            # Check for SKU-specific ALL commands BEFORE global commands
+            # Pattern: "<SKU>_ALL_<ACTION>" where SKU can contain underscores
+            if "_ALL_" in command:
+                # Could be SKU-specific or global
+                if command in ["ALL_ON", "ALL_OFF", "ALL_TOGGLE"]:
+                    # Global command (no SKU prefix)
+                    _LOG.info(f"📢 Routing to GLOBAL command handler: {command}")
+                    return await self._execute_global_command(command)
+                else:
+                    # SKU-specific command (has prefix before _ALL_)
+                    _LOG.info(f"🏷️  Routing to SKU-SPECIFIC command handler: {command}")
+                    return await self._execute_sku_command(command)
+            
             if command.startswith("ALL_"):
+                # Global command without _ALL_ pattern (shouldn't happen but handle anyway)
+                _LOG.info(f"📢 Routing to GLOBAL command handler: {command}")
                 return await self._execute_global_command(command)
             
+            # Individual device command
+            _LOG.debug(f"🔧 Routing to DEVICE command handler: {command}")
             return await self._execute_device_command(command)
             
         except Exception as e:
-            _LOG.error(f"Error executing Govee command {command}: {e}")
+            _LOG.error(f"❌ Error executing Govee command {command}: {e}", exc_info=True)
             return False
     
     async def _execute_global_command(self, command: str) -> bool:
-        """
-        Execute ALL_ON/ALL_OFF/ALL_TOGGLE commands sequentially with proper delays.
+        """Execute global commands (ALL_ON, ALL_OFF, ALL_TOGGLE) on ALL devices."""
+        _LOG.info(f"🌍 GLOBAL COMMAND: {command} for ALL {len(self._discovered_devices)} devices")
         
-        FIX: Changed from concurrent (asyncio.gather) to sequential execution
-        to respect API throttle limits (100ms global, 300ms per-device).
-        """
+        # Pre-wait to reduce risk of hitting recent command throttles
+        await asyncio.sleep(0.15)
+        
         success_count = 0
-        total_devices = 0
-        
-        _LOG.info(f"Executing {command} for all devices sequentially")
+        failed_devices = []
+        skipped_devices = []
         
         for device_id, device_info in self._discovered_devices.items():
             if not device_info.get("supports_power", True):
+                skipped_devices.append(device_info.get('name', device_id))
                 continue
                 
-            total_devices += 1
-            device_name = device_info.get("name", device_id)
+            device_name = device_info.get('name', f'Device_{device_id}')
             
-            # Determine action
-            if command == "ALL_ON":
-                action = "turn_on"
-            elif command == "ALL_OFF":
-                action = "turn_off"
-            elif command == "ALL_TOGGLE":
-                action = "toggle"
-            else:
-                continue
-            
-            # Execute with proper throttling
             try:
-                result = await self._execute_device_action_safe(device_id, action, device_name)
+                if command == "ALL_ON":
+                    result = await self._execute_device_action_with_retry(device_id, "turn_on", device_name)
+                elif command == "ALL_OFF":
+                    result = await self._execute_device_action_with_retry(device_id, "turn_off", device_name)
+                elif command == "ALL_TOGGLE":
+                    result = await self._execute_device_action_with_retry(device_id, "toggle", device_name)
+                else:
+                    continue
+                
                 if result:
                     success_count += 1
-                    _LOG.info(f"{command}: ✓ {device_name}")
+                    _LOG.info(f"  ✅ {device_name}")
                 else:
-                    _LOG.warning(f"{command}: ✗ {device_name} (failed)")
-            except Exception as e:
-                _LOG.error(f"{command}: ✗ {device_name} (error: {e})")
-            
-            # Add delay between devices (150ms = above 100ms global throttle)
-            if total_devices > 1:  # Don't delay after last device
+                    failed_devices.append(device_name)
+                    _LOG.warning(f"  ❌ {device_name}")
+                
+                # Delay between devices (respects 10 req/60s = 150ms minimum)
                 await asyncio.sleep(0.15)
+                
+            except Exception as e:
+                failed_devices.append(device_name)
+                _LOG.error(f"  ⚠️  Exception on {device_name}: {e}")
         
-        _LOG.info(f"{command} completed: {success_count}/{total_devices} devices succeeded")
+        _LOG.info(f"🌍 GLOBAL {command} RESULT: {success_count}/{len(self._discovered_devices)} succeeded, {len(failed_devices)} failed, {len(skipped_devices)} skipped")
+        if failed_devices:
+            _LOG.warning(f"   Failed: {', '.join(failed_devices)}")
+        if skipped_devices:
+            _LOG.info(f"   Skipped (no power support): {', '.join(skipped_devices)}")
+        
         return success_count > 0
     
-    async def _execute_device_action_safe(self, device_id: str, action: str, device_name: str) -> bool:
-        """
-        Execute a device action with throttle checking and retry logic.
+    async def _execute_sku_command(self, command: str) -> bool:
+        """Execute SKU-specific commands (e.g., H6010_ALL_ON, H61E1_ALL_OFF).
         
-        FIX: Now waits and retries if throttled instead of returning True immediately.
+        CRITICAL: This MUST only affect devices within the specified SKU group.
         """
-        try:
-            # Check throttle - if we need to wait, do so
-            max_retries = 3
-            for attempt in range(max_retries):
+        # Parse command: "H6010_ALL_ON" -> sku_prefix="H6010", action="ALL_ON"
+        parts = command.split("_ALL_")
+        if len(parts) != 2:
+            _LOG.error(f"❌ Invalid SKU command format: {command} (expected format: SKU_ALL_ACTION)")
+            return False
+        
+        sku_prefix = parts[0]  # e.g., "H6010"
+        action = f"ALL_{parts[1]}"  # e.g., "ALL_ON", "ALL_OFF", "ALL_TOGGLE"
+        
+        _LOG.info(f"🏷️  SKU COMMAND: {command} -> SKU={sku_prefix}, ACTION={action}")
+        
+        # Find matching SKU (handle case variations and hyphen/underscore normalization)
+        target_sku = None
+        sku_groups = self._group_devices_by_sku()
+        
+        for sku in sku_groups.keys():
+            sku_normalized = sku.replace("-", "_").upper()
+            if sku_normalized == sku_prefix:
+                target_sku = sku
+                _LOG.info(f"   ✓ Matched SKU: {sku} (normalized: {sku_normalized})")
+                break
+        
+        if not target_sku:
+            _LOG.error(f"❌ Could not find SKU matching prefix: {sku_prefix}")
+            _LOG.error(f"   Available SKUs: {list(sku_groups.keys())}")
+            _LOG.error(f"   Available normalized: {[sku.replace('-', '_').upper() for sku in sku_groups.keys()]}")
+            return False
+        
+        # Get devices ONLY for this SKU
+        sku_devices = sku_groups.get(target_sku, {})
+        
+        if not sku_devices:
+            _LOG.warning(f"⚠️  No devices found for SKU: {target_sku}")
+            return False
+        
+        _LOG.info(f"🏷️  Executing {action} for SKU '{target_sku}' ({len(sku_devices)} devices)")
+        _LOG.info(f"   Devices in this SKU: {[info.get('name', id) for id, info in sku_devices.items()]}")
+        
+        # Pre-wait to reduce risk of hitting recent command throttles  
+        await asyncio.sleep(0.15)
+        
+        success_count = 0
+        failed_devices = []
+        skipped_devices = []
+        
+        for device_id, device_info in sku_devices.items():
+            if not device_info.get("supports_power", True):
+                skipped_devices.append(device_info.get('name', device_id))
+                continue
+                
+            device_name = device_info.get('name', f'Device_{device_id}')
+            
+            try:
+                if action == "ALL_ON":
+                    result = await self._execute_device_action_with_retry(device_id, "turn_on", device_name)
+                elif action == "ALL_OFF":
+                    result = await self._execute_device_action_with_retry(device_id, "turn_off", device_name)
+                elif action == "ALL_TOGGLE":
+                    result = await self._execute_device_action_with_retry(device_id, "toggle", device_name)
+                else:
+                    _LOG.error(f"❌ Unknown action: {action}")
+                    continue
+                
+                if result:
+                    success_count += 1
+                    _LOG.info(f"  ✅ {device_name}")
+                else:
+                    failed_devices.append(device_name)
+                    _LOG.warning(f"  ❌ {device_name}")
+                
+                # Delay between devices (respects 10 req/60s = 150ms minimum)
+                await asyncio.sleep(0.15)
+                
+            except Exception as e:
+                failed_devices.append(device_name)
+                _LOG.error(f"  ⚠️  Exception on {device_name}: {e}")
+        
+        _LOG.info(f"🏷️  SKU {command} RESULT: {success_count}/{len(sku_devices)} succeeded, {len(failed_devices)} failed, {len(skipped_devices)} skipped")
+        if failed_devices:
+            _LOG.warning(f"   Failed: {', '.join(failed_devices)}")
+        if skipped_devices:
+            _LOG.info(f"   Skipped (no power support): {', '.join(skipped_devices)}")
+        
+        # CRITICAL VALIDATION: Ensure we only affected devices in target SKU
+        all_device_ids = set(self._discovered_devices.keys())
+        sku_device_ids = set(sku_devices.keys())
+        if not sku_device_ids.issubset(all_device_ids):
+            _LOG.error(f"❌ CRITICAL: SKU devices not subset of all devices! This should never happen!")
+            
+        return success_count > 0
+    
+    async def _execute_device_action_with_retry(self, device_id: str, action: str, device_name: str, max_retries: int = 3) -> bool:
+        """Execute action on a single device with automatic retry on throttle.
+        
+        This replaces the old _execute_device_action_safe with better retry logic.
+        """
+        for attempt in range(max_retries):
+            try:
+                # Check throttle
                 if await self._check_throttle(device_id):
-                    # Throttle passed, execute command
-                    break
+                    # Throttle OK, execute command
+                    device_info = self._discovered_devices.get(device_id)
+                    if not device_info:
+                        _LOG.error(f"Device {device_id} not found in discovered devices")
+                        return False
                     
+                    from uc_intg_govee.client import GoveeDevice
+                    
+                    device_data = {
+                        "sku": device_info.get("sku", ""),
+                        "device": device_id,
+                        "deviceName": device_name,
+                        "type": device_info.get("api_type", ""),
+                        "capabilities": device_info.get("capabilities", [])
+                    }
+                    
+                    device = GoveeDevice(device_data)
+                    
+                    if action == "turn_on":
+                        result = await self._client.turn_on(device)
+                        if result:
+                            self._device_states[device_id] = True
+                        return result
+                        
+                    elif action == "turn_off":
+                        result = await self._client.turn_off(device)
+                        if result:
+                            self._device_states[device_id] = False
+                        return result
+                        
+                    elif action == "toggle":
+                        current_state = self._device_states.get(device_id, False)
+                        _LOG.debug(f"Toggle {device_name}: cached={'ON' if current_state else 'OFF'} -> {'OFF' if current_state else 'ON'}")
+                        
+                        if current_state:
+                            result = await self._client.turn_off(device)
+                            if result:
+                                self._device_states[device_id] = False
+                        else:
+                            result = await self._client.turn_on(device)
+                            if result:
+                                self._device_states[device_id] = True
+                        
+                        return result
+                    else:
+                        _LOG.error(f"Unknown action: {action}")
+                        return False
+                else:
+                    # Throttled, wait and retry
+                    if attempt < max_retries - 1:
+                        wait_time = 0.15 * (attempt + 1)  # 150ms, 300ms, 450ms
+                        _LOG.debug(f"⏳ Throttled: {device_name}, retry {attempt+1}/{max_retries} in {wait_time}s")
+                        await asyncio.sleep(wait_time)
+                    else:
+                        _LOG.warning(f"⏳ Throttled: {device_name} after {max_retries} attempts")
+                        return False
+                        
+            except Exception as e:
+                _LOG.error(f"❌ Exception executing {action} on {device_name}: {e}")
                 if attempt < max_retries - 1:
-                    # Wait and retry
-                    _LOG.debug(f"Throttled {device_name}, waiting 200ms (attempt {attempt + 1}/{max_retries})")
                     await asyncio.sleep(0.2)
                 else:
-                    # Max retries exceeded
-                    _LOG.warning(f"Throttle max retries exceeded for {device_name}")
                     return False
-            
-            device_info = self._discovered_devices.get(device_id)
-            if not device_info:
-                return False
-            
-            from uc_intg_govee.client import GoveeDevice
-            
-            device_data = {
-                "sku": device_info.get("sku", ""),
-                "device": device_id,
-                "deviceName": device_name,
-                "type": device_info.get("api_type", ""),
-                "capabilities": device_info.get("capabilities", [])
-            }
-            
-            device = GoveeDevice(device_data)
-            
-            if action == "turn_on":
-                result = await self._client.turn_on(device)
-                if result:
-                    self._device_states[device_id] = True
-                return result
-            elif action == "turn_off":
-                result = await self._client.turn_off(device)
-                if result:
-                    self._device_states[device_id] = False
-                return result
-            elif action == "toggle":
-                current_state = await self._get_device_state(device_id)
-                _LOG.info(f"Toggle for {device_name}: cached state is {'ON' if current_state else 'OFF'}, will turn {'OFF' if current_state else 'ON'}")
-                
-                if current_state:
-                    result = await self._client.turn_off(device)
-                    if result:
-                        self._device_states[device_id] = False
-                        _LOG.info(f"Toggled {device_name} OFF")
-                else:
-                    result = await self._client.turn_on(device)
-                    if result:
-                        self._device_states[device_id] = True
-                        _LOG.info(f"Toggled {device_name} ON")
-                
-                return result
-            else:
-                return False
-                
-        except Exception as e:
-            _LOG.error(f"Error executing {action} on device {device_name}: {e}")
-            return False
+        
+        return False
     
     async def _execute_device_command(self, command: str) -> bool:
+        """Execute individual device commands (not ALL commands)."""
         for device_id, device_info in self._discovered_devices.items():
             device_name = device_info.get("name", f"Device_{device_id}")
             device_prefix = self._clean_command_name(device_name)
             
             if command.startswith(device_prefix + "_"):
+                _LOG.debug(f"🔧 Device command: {command} -> {device_name}")
+                
                 # Check throttle with retry
-                max_retries = 3
-                for attempt in range(max_retries):
-                    if await self._check_throttle(device_id):
-                        break
-                    if attempt < max_retries - 1:
-                        await asyncio.sleep(0.2)
-                    else:
-                        _LOG.warning(f"Throttle exceeded for {device_name}")
+                if not await self._check_throttle(device_id):
+                    _LOG.debug(f"⏳ Throttled: {device_name}, waiting 200ms")
+                    await asyncio.sleep(0.2)
+                    if not await self._check_throttle(device_id):
+                        _LOG.warning(f"⏳ Still throttled: {device_name}")
                         return False
                 
                 action_part = command[len(device_prefix)+1:]
@@ -662,11 +839,12 @@ class GoveeRemote:
                         return await self._execute_mapped_action(device, govee_action_result, device_info, device_id)
                         
                     except Exception as e:
-                        _LOG.error(f"Exception executing action on device {device_name}: {e}")
+                        _LOG.error(f"❌ Exception executing action on {device_name}: {e}")
                         return False
                 
                 return False
         
+        _LOG.warning(f"❓ No device found for command: {command}")
         return False
     
     async def _execute_mapped_action(self, device: 'GoveeDevice', action: str, device_info: Dict[str, Any], device_id: str = None) -> bool:
@@ -683,19 +861,17 @@ class GoveeRemote:
                 return result
             elif action == "toggle":
                 if device_id:
-                    current_state = await self._get_device_state(device_id)
-                    _LOG.info(f"Toggle for {device.device_name}: cached state is {'ON' if current_state else 'OFF'}, will turn {'OFF' if current_state else 'ON'}")
+                    current_state = self._device_states.get(device_id, False)
+                    _LOG.debug(f"Toggle {device.device_name}: cached={'ON' if current_state else 'OFF'} -> {'OFF' if current_state else 'ON'}")
                     
                     if current_state:
                         result = await self._client.turn_off(device)
                         if result:
                             self._device_states[device_id] = False
-                            _LOG.info(f"Toggled {device.device_name} OFF")
                     else:
                         result = await self._client.turn_on(device)
                         if result:
                             self._device_states[device_id] = True
-                            _LOG.info(f"Toggled {device.device_name} ON")
                     
                     return result
                 else:
@@ -780,7 +956,7 @@ class GoveeRemote:
                 return False
                 
         except Exception as e:
-            _LOG.error(f"Error executing mapped action {action}: {e}")
+            _LOG.error(f"❌ Error executing mapped action {action}: {e}")
             return False
 
     def _map_ui_action_to_govee_action(self, ui_action: str, device_info: Dict[str, Any]) -> Optional[str]:
