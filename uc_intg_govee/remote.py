@@ -541,12 +541,35 @@ class GoveeRemote:
         return ucapi.StatusCodes.OK
     
     async def _handle_send_cmd(self, params: dict[str, Any] | None) -> ucapi.StatusCodes:
+        """Handle send_cmd - returns immediately, executes in background for ALL commands."""
         if not params or "command" not in params:
             return ucapi.StatusCodes.BAD_REQUEST
         
         command = params["command"]
-        success = await self._execute_govee_command(command)
-        return ucapi.StatusCodes.OK if success else ucapi.StatusCodes.SERVER_ERROR
+        
+        # Check if this is an ALL command (global or SKU-specific)
+        is_all_command = (
+            command in ["ALL_ON", "ALL_OFF", "ALL_TOGGLE"] or 
+            "_ALL_" in command
+        )
+        
+        if is_all_command:
+            # Spawn background task for ALL commands to prevent timeout
+            _LOG.info(f"⚡ Spawning BACKGROUND task for: {command}")
+            asyncio.create_task(self._execute_govee_command_background(command))
+            # Return immediately to Remote
+            return ucapi.StatusCodes.OK
+        else:
+            # Execute individual device commands synchronously (they're fast)
+            success = await self._execute_govee_command(command)
+            return ucapi.StatusCodes.OK if success else ucapi.StatusCodes.SERVER_ERROR
+    
+    async def _execute_govee_command_background(self, command: str) -> None:
+        """Execute command in background (for ALL commands to prevent timeout)."""
+        try:
+            await self._execute_govee_command(command)
+        except Exception as e:
+            _LOG.error(f"❌ Background command execution failed for {command}: {e}", exc_info=True)
     
     async def _execute_govee_command(self, command: str) -> bool:
         """Route commands to appropriate handlers."""
@@ -586,9 +609,6 @@ class GoveeRemote:
         """Execute global commands (ALL_ON, ALL_OFF, ALL_TOGGLE) on ALL devices."""
         _LOG.info(f"🌍 GLOBAL COMMAND: {command} for ALL {len(self._discovered_devices)} devices")
         
-        # Pre-wait to reduce risk of hitting recent command throttles
-        await asyncio.sleep(0.15)
-        
         success_count = 0
         failed_devices = []
         skipped_devices = []
@@ -617,8 +637,8 @@ class GoveeRemote:
                     failed_devices.append(device_name)
                     _LOG.warning(f"  ❌ {device_name}")
                 
-                # Delay between devices (respects 10 req/60s = 150ms minimum)
-                await asyncio.sleep(0.15)
+                # Delay between devices: 120ms (respects 10 req/60s = 150ms minimum with safety margin)
+                await asyncio.sleep(0.12)
                 
             except Exception as e:
                 failed_devices.append(device_name)
@@ -675,9 +695,6 @@ class GoveeRemote:
         _LOG.info(f"🏷️  Executing {action} for SKU '{target_sku}' ({len(sku_devices)} devices)")
         _LOG.info(f"   Devices in this SKU: {[info.get('name', id) for id, info in sku_devices.items()]}")
         
-        # Pre-wait to reduce risk of hitting recent command throttles  
-        await asyncio.sleep(0.15)
-        
         success_count = 0
         failed_devices = []
         skipped_devices = []
@@ -707,8 +724,8 @@ class GoveeRemote:
                     failed_devices.append(device_name)
                     _LOG.warning(f"  ❌ {device_name}")
                 
-                # Delay between devices (respects 10 req/60s = 150ms minimum)
-                await asyncio.sleep(0.15)
+                # Delay between devices: 120ms (respects 10 req/60s = 150ms minimum with safety margin)
+                await asyncio.sleep(0.12)
                 
             except Exception as e:
                 failed_devices.append(device_name)
@@ -728,10 +745,10 @@ class GoveeRemote:
             
         return success_count > 0
     
-    async def _execute_device_action_with_retry(self, device_id: str, action: str, device_name: str, max_retries: int = 3) -> bool:
+    async def _execute_device_action_with_retry(self, device_id: str, action: str, device_name: str, max_retries: int = 2) -> bool:
         """Execute action on a single device with automatic retry on throttle.
         
-        This replaces the old _execute_device_action_safe with better retry logic.
+        Reduced retries to 2 for faster failure in ALL commands.
         """
         for attempt in range(max_retries):
             try:
@@ -787,7 +804,7 @@ class GoveeRemote:
                 else:
                     # Throttled, wait and retry
                     if attempt < max_retries - 1:
-                        wait_time = 0.15 * (attempt + 1)  # 150ms, 300ms, 450ms
+                        wait_time = 0.15
                         _LOG.debug(f"⏳ Throttled: {device_name}, retry {attempt+1}/{max_retries} in {wait_time}s")
                         await asyncio.sleep(wait_time)
                     else:
@@ -797,7 +814,7 @@ class GoveeRemote:
             except Exception as e:
                 _LOG.error(f"❌ Exception executing {action} on {device_name}: {e}")
                 if attempt < max_retries - 1:
-                    await asyncio.sleep(0.2)
+                    await asyncio.sleep(0.15)
                 else:
                     return False
         
